@@ -1,30 +1,119 @@
-import { webhookCallback } from "https://deno.land/x/grammy@v1.32.0/mod.ts";
-import express, { Request, Response } from 'npm:express';
-import { bot } from "./lib/bot.ts";
+import { Bot } from "https://deno.land/x/grammy@v1.32.0/mod.ts";  
 
-const app = express();
+// Создайте экземпляр класса `Bot` и передайте ему токен вашего бота.  
+export const bot = new Bot(Deno.env.get("BOT_TOKEN") || ""); // Убедитесь, что токен установлен  
 
-const handleUpdate = webhookCallback(bot, 'express');
+// Состояние пользователя  
+const userState: { [userId: string]: { hobby: string; place: string; cafe: string; time: string } } = {};  
+const users: { [userId: string]: { hobby: string; place: string; cafe: string; time: string } } = {}; // Хранение всех зарегистрированных пользователей  
+ 
+bot.command("start", (ctx) => {  
+    ctx.reply("Добро пожаловать! Чтобы начать регистрацию, введите /register.");  
+});  
+ 
+bot.command("register", (ctx) => {  
+    const userId = ctx.from.id.toString();  
+    userState[userId] = {
+        hobby : '',
+        place : '',
+        cafe : '',
+        time: '',
+    };  
+    ctx.reply("О чем бы вы хотели пообщаться? Напишите свои интересы через запятую.");  
+});  
 
-app.use(express.json());
+// Сбор информации от пользователя  
+bot.on("message", async (ctx) => {  
+    const userId = ctx.from.id.toString();  
 
-const web_hook_path = `/${bot.token}/webhook`;
+    if (users[userId]?.hobby === '') {  
+        userState[userId].hobby = ctx.message.text;  
+        await ctx.reply("В каком районе вам было бы удобно встречаться?");  
+    } else if (userState[userId]?.place === '') {  
+        userState[userId].place = ctx.message.text;  
+        await ctx.reply("Какую кофейню вы предпочитаете? Напишите её название.");  
+    } else if (userState[userId]?.cafe === '') {  
+        userState[userId].cafe = ctx.message.text;  
+        await ctx.reply("Во сколько вам удобнее встречаться? Напишите время.");  
+    } else if (userState[userId]?.time === '') {  
+        userState[userId].time = ctx.message.text;  
 
-app.post(web_hook_path, async (req: Request, res: Response) => {
-    if (req.method === "POST" && req.path === web_hook_path) {
-        try {
-            await handleUpdate(req, res); // Передаем запрос и ответ в обработчик обновлений
-        } catch (err) {
-            console.error(err);
-            res.sendStatus(500); // Ответ с ошибкой
+        // Сохраняем информацию о пользователе  
+        users[userId] = {   
+            hobby: userState[userId].hobby,   
+            place: userState[userId].place,   
+            cafe: userState[userId].cafe,   
+            time: userState[userId].time   
+        };  
+
+        // Подтверждение данных  
+        await ctx.reply(`Спасибо за регистрацию! Вот ваши данные:\n- Интересы: ${users[userId].hobby}\n- Район: ${users[userId].place}\n- Кафе: ${users[userId].cafe}\n- Время: ${users[userId].time}`);  
+
+        // Проверка на совпадения  
+        await findMatches(userId);  
+
+        // Очистка состояния после завершения  
+        delete userState[userId];  
+    } else {  
+        await ctx.reply("Я не знаю, как на это ответить. Пожалуйста, начните регистрацию с /register.");  
+    }  
+});  
+
+// Функция для поиска совпадений  
+async function findMatches(userId: string) {  
+    const user = users[userId];  
+    for (const [otherUserId, otherUser] of Object.entries(users)) {  
+        if (otherUserId !== userId) {  
+            // Проверяем совпадения по интересам, месту, кафе и времени  
+            const isMatch = user.hobby.split(',').some(hobby => otherUser.hobby.includes(hobby.trim())) &&  
+                            user.place === otherUser.place &&  
+                            user.cafe === otherUser.cafe &&  
+                            user.time === otherUser.time;  
+
+            if (isMatch) {  
+                // Уведомляем о совпадении  
+                await bot.api.sendMessage(otherUserId,  
+                    `У вас совпадение с пользователем ${userId}!\n` +  
+                    `- Хобби: ${user.hobby}\n` +  
+                    `- Район: ${user.place}\n` +  
+                    `- Кафе: ${user.cafe}\n` +  
+                    `- Время: ${user.time}\n\n` +  
+                    `Хотите встретиться? Ответьте "Да" или "Нет".`  
+                );  
+
+                // Устанавливаем состояние ожидания ответа  
+                userState[otherUserId] = { waitingForResponse: true, otherUserId: userId };  
+            }  
+        }  
+    }  
+}  
+
+// Обработка текстовых сообщений  
+bot.on("message:text", async (ctx) => {  
+    const userId = ctx.from.id.toString();  
+    const state = userState[userId];  
+
+    // Проверяем, ожидает ли бот ответа от этого пользователя  
+    if (state?.waitingForResponse) {  
+        const otherUserId = state.otherUserId;  
+
+        if (ctx.message.text.toLowerCase() === "да") {  
+            await bot.api.sendMessage(otherUserId, `Пользователь ${userId} согласен на встречу! Договоритесь о времени и месте.`);  
+            await ctx.reply("Отлично! Договоритесь о времени и месте с другим пользователем.");  
+        } else if (ctx.message.text.toLowerCase() === "нет") {  
+            await bot.api.sendMessage(otherUserId, `Пользователь ${userId} не заинтересован в встрече.`);  
+            await ctx.reply("Хорошо, если вы передумаете, просто дайте знать!");  
+        } else {  
+            await ctx.reply('Пожалуйста, ответьте "Да" или "Нет".');  
         }
-    } else {
-        res.sendStatus(404); // Если путь не соответствует токену бота или метод не POST
-    }
-});
+    } else {  
+        // Обработка других сообщений, если не ожидается ответа  
+        ctx.reply("Я не знаю, как на это ответить. Пожалуйста, используйте команду /register для начала.");  
+    }  
+})
 
-// Слушаем на порту 5000
-const PORT = 5000;
+// Запуск бота  
+await bot.start();
 app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
 });
